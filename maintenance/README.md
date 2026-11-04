@@ -54,7 +54,10 @@ go vet ./...
 
 ## 后续同步
 
+- `origin` 指向 `git@github.com:momo-qi-gif/CliRelay.git`，`upstream` 指向 `https://github.com/kittors/CliRelay.git`；这里 upstream 是原 CliRelay，不是 CLIProxyAPI。
+- 自有 `main` 保存已验证维护版本；新修复与上游同步在独立分支完成后合入。远端配置是本地 Git 元数据，新克隆需按 [同步流程](sync-upstream.md) 添加 upstream。
 - 保持发行基线与维护分支可追踪；同步新版本时逐项检查上述补丁是否已被替代。
+- Docker 自动发布已限制为仅原仓库 `kittors/CliRelay` 运行，fork 不向写死的上游镜像地址发布。将来启用自有镜像发布前，应单独确认目标、权限和触发方式；源码合并不等于生产部署。
 - 每次修复同时维护回归测试，优先验证实际 HTTP 转换链。
 - 新产物使用新的版本、构建时间和源码 commit；不要复用历史标签伪装成原二进制。
 - 运维备份、切换和回滚证据留在运维文档仓库；本仓库不存凭证、生产 config、DB dump、账号文件或日志正文。

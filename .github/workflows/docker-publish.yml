@@ -19,6 +19,8 @@ env:
 
 jobs:
   build-and-push:
+    # Forks maintain source independently; publishing to the upstream image is not implicit.
+    if: github.repository == 'kittors/CliRelay'
     runs-on: ubuntu-latest
     permissions:
       contents: read
