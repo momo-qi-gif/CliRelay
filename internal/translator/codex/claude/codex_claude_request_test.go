@@ -6,6 +6,25 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertClaudeRequestToCodex_MidConversationSystemRole(t *testing.T) {
+	for _, content := range []string{`"Keep responses brief."`, `[{"type":"text","text":"Keep responses brief."}]`} {
+		input := []byte(`{"system":[{"type":"text","text":"Top-level instruction."}],"messages":[{"role":"user","content":"Hello"},{"role":"system","content":` + content + `},{"role":"assistant","content":"Hi"}]}`)
+		out := ConvertClaudeRequestToCodex("gpt-6.1-sol", input, true)
+		messages := gjson.GetBytes(out, "input").Array()
+		if len(messages) != 4 {
+			t.Fatalf("expected four messages, got %s", out)
+		}
+		for i, role := range []string{"developer", "user", "developer", "assistant"} {
+			if got := messages[i].Get("role").String(); got != role {
+				t.Errorf("message %d: role = %q, want %q", i, got, role)
+			}
+		}
+		if got := messages[2].Get("content.0.text").String(); got != "Keep responses brief." {
+			t.Errorf("system text changed: %q", got)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToCodex_StripsDeferLoading(t *testing.T) {
 	input := []byte(`{
 		"model": "claude-sonnet-4-6",

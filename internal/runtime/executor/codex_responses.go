@@ -193,8 +193,27 @@ func extractCodexResponsesOutputItemDone(payload []byte) ([]byte, string, bool) 
 	return []byte(item.Raw), key, true
 }
 
+// Only length-limited incomplete responses can be represented as a successful
+// Claude partial answer. Other reasons remain explicit upstream errors.
+func codexClaudeIncompleteTerminalError(payload []byte) error {
+	root := gjson.ParseBytes(payload)
+	if root.Get("type").String() != "response.incomplete" && root.Get("response.status").String() != "incomplete" {
+		return nil
+	}
+	if root.Get("response.incomplete_details.reason").String() == "max_output_tokens" {
+		return nil
+	}
+	// Never echo arbitrary upstream reason text or present it as transport loss.
+	reason := "unknown_reason"
+	if root.Get("response.incomplete_details.reason").String() == "content_filter" {
+		reason = "content_filter"
+	}
+	return statusErr{code: 502, msg: "upstream response incomplete: " + reason}
+}
+
 func mergeCodexResponsesCompletedOutput(payload []byte, pendingItems [][]byte, pendingKeys []string) []byte {
-	if len(pendingItems) == 0 || gjson.GetBytes(payload, "type").String() != "response.completed" {
+	eventType := gjson.GetBytes(payload, "type").String()
+	if len(pendingItems) == 0 || (eventType != "response.completed" && eventType != "response.incomplete") {
 		return payload
 	}
 

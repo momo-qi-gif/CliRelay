@@ -22,13 +22,16 @@ var (
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
-	HasToolCall               bool
-	BlockIndex                int
-	HasReceivedArgumentsDelta bool
-	OpenBlockType             string
-	OpenBlockIndex            int
-	ActiveFunctionCallKeys    map[string]struct{}
-	MessageCompleted          bool
+	HasToolCall       bool
+	BlockIndex        int
+	OpenBlockType     string
+	OpenBlockIndex    int
+	MessageCompleted  bool
+	RefusalTextByPart map[string]string
+	TextByPart        map[string]string
+	Tools             []*codexClaudePendingTool
+	DeferredEvents    [][]byte
+	ReplayingDeferred bool
 }
 
 const (
@@ -75,6 +78,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	rootResult := gjson.ParseBytes(rawJSON)
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
+	if !params.ReplayingDeferred && codexClaudeHasPendingTool(params) &&
+		(strings.HasPrefix(typeStr, "response.reasoning_summary_") ||
+			strings.HasPrefix(typeStr, "response.output_text.") || strings.HasPrefix(typeStr, "response.refusal.") ||
+			strings.HasPrefix(typeStr, "response.content_part.")) {
+		params.DeferredEvents = append(params.DeferredEvents, append([]byte("data: "), rawJSON...))
+		return []string{}
+	}
 	template := ""
 	if typeStr == "response.created" {
 		template = `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`
@@ -116,6 +126,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			output += closeCodexClaudeContentBlock(params)
 		}
 	} else if typeStr == "response.content_part.added" {
+		if params.OpenBlockType == codexClaudeToolBlock {
+			return []string{}
+		}
 		if params.OpenBlockType == codexClaudeTextBlock {
 			return []string{output}
 		}
@@ -126,36 +139,54 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 		output += "event: content_block_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
+	} else if typeStr == "response.refusal.delta" || typeStr == "response.refusal.done" {
+		text := rootResult.Get("delta").String()
+		full := typeStr == "response.refusal.done"
+		if full {
+			text = rootResult.Get("refusal").String()
+		}
+		output += codexClaudeRefusalText(params, codexClaudeRefusalKey(rootResult), text, full)
+	} else if typeStr == "response.output_text.done" {
+		output += codexClaudeVisibleText(params, codexClaudeRefusalKey(rootResult), rootResult.Get("text").String(), true, false)
 	} else if typeStr == "response.output_text.delta" {
-		if params.OpenBlockType == codexClaudeThinkingBlock {
-			output += closeCodexClaudeContentBlock(params)
-		}
-		if params.OpenBlockType == "" {
-			template = `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
-			template, _ = sjson.Set(template, "index", params.BlockIndex)
-			openCodexClaudeContentBlock(params, codexClaudeTextBlock)
-			output += "event: content_block_start\n"
-			output += fmt.Sprintf("data: %s\n\n", template)
-		}
-		if params.OpenBlockType != codexClaudeTextBlock {
-			return []string{output}
-		}
-		template = `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
-		template, _ = sjson.Set(template, "index", params.OpenBlockIndex)
-		template, _ = sjson.Set(template, "delta.text", rootResult.Get("delta").String())
-
-		output += "event: content_block_delta\n"
-		output += fmt.Sprintf("data: %s\n\n", template)
+		output += codexClaudeVisibleText(params, codexClaudeRefusalKey(rootResult), rootResult.Get("delta").String(), false, false)
 	} else if typeStr == "response.content_part.done" {
+		if kind := rootResult.Get("part.type").String(); kind == "refusal" || kind == "output_text" {
+			field := "part.text"
+			if kind == "refusal" {
+				field = "part.refusal"
+			}
+			output += codexClaudeVisibleText(params, codexClaudeRefusalKey(rootResult), rootResult.Get(field).String(), true, kind == "refusal")
+		}
 		if params.OpenBlockType == codexClaudeTextBlock {
 			output += closeCodexClaudeContentBlock(params)
 		}
-	} else if typeStr == "response.completed" {
+	} else if typeStr == "response.completed" || (typeStr == "response.incomplete" && rootResult.Get("response.incomplete_details.reason").String() == "max_output_tokens") {
+		// Recover un-emitted text/refusal suffixes and registered tool arguments
+		// from the terminal snapshot, without duplicating prior done events.
+		for outputIndex, item := range rootResult.Get("response.output").Array() {
+			if item.Get("type").String() == "function_call" {
+				event := gjson.Parse(fmt.Sprintf(`{"output_index":%d}`, outputIndex))
+				if tool := codexClaudeFindTool(params, codexClaudeFunctionCallKeys(event, item)); tool != nil && !tool.Closed {
+					output += codexClaudeToolArguments(params, tool, item.Get("arguments").String(), true)
+					tool.Done = true
+				}
+			}
+		}
+		for _, tool := range params.Tools {
+			tool.Done = true
+		}
+		output += codexClaudeDrainTools(params)
+		for outputIndex, item := range rootResult.Get("response.output").Array() {
+			output += codexClaudeMessageSnapshot(params, outputIndex, item)
+		}
 		output += closeCodexClaudeContentBlock(params)
 		template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 		p := params.HasToolCall
 		stopReason := rootResult.Get("response.stop_reason").String()
-		if p {
+		if rootResult.Get("response.incomplete_details.reason").String() == "max_output_tokens" {
+			template, _ = sjson.Set(template, "delta.stop_reason", "max_tokens")
+		} else if p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
 		} else if stopReason == "max_tokens" || stopReason == "stop" {
 			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
@@ -193,63 +224,209 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			}
 
 			keys := codexClaudeFunctionCallKeys(rootResult, itemResult)
-			if params.OpenBlockType == codexClaudeToolBlock && codexClaudeFunctionCallMatches(params, keys) {
+			if codexClaudeFindTool(params, keys) != nil {
 				return []string{output}
 			}
-			output += closeCodexClaudeContentBlock(params)
-			params.HasToolCall = true
-			params.HasReceivedArgumentsDelta = false
-			template = `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-			template, _ = sjson.Set(template, "index", params.BlockIndex)
-			template, _ = sjson.Set(template, "content_block.id", callID)
-			template, _ = sjson.Set(template, "content_block.name", name)
-			openCodexClaudeContentBlock(params, codexClaudeToolBlock)
-			params.ActiveFunctionCallKeys = keys
-
-			output += "event: content_block_start\n"
-			output += fmt.Sprintf("data: %s\n\n", template)
-
-			template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
-			template, _ = sjson.Set(template, "index", params.OpenBlockIndex)
-
-			output += "event: content_block_delta\n"
-			output += fmt.Sprintf("data: %s\n\n", template)
+			tool := &codexClaudePendingTool{Keys: keys, Name: name, CallID: callID}
+			params.Tools = append(params.Tools, tool)
+			output += codexClaudeDrainTools(params)
 		}
 	} else if typeStr == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
-		if itemType == "function_call" {
-			if params.OpenBlockType != codexClaudeToolBlock || !codexClaudeFunctionCallMatches(params, codexClaudeFunctionCallKeys(rootResult, itemResult)) {
-				return []string{output}
+		if itemType == "message" {
+			output += codexClaudeMessageSnapshot(params, int(rootResult.Get("output_index").Int()), itemResult)
+		} else if itemType == "function_call" {
+			if tool := codexClaudeFindTool(params, codexClaudeFunctionCallKeys(rootResult, itemResult)); tool != nil && !tool.Closed {
+				output += codexClaudeToolArguments(params, tool, itemResult.Get("arguments").String(), true)
+				tool.Done = true
+				output += codexClaudeDrainTools(params)
 			}
-			if !params.HasReceivedArgumentsDelta {
-				if args := itemResult.Get("arguments").String(); args != "" {
-					output += codexClaudeFunctionArgumentsDelta(params.OpenBlockIndex, args)
-					params.HasReceivedArgumentsDelta = true
-				}
-			}
-			output += closeCodexClaudeContentBlock(params)
 		}
-	} else if typeStr == "response.function_call_arguments.delta" {
-		if params.OpenBlockType == codexClaudeToolBlock && codexClaudeFunctionCallMatches(params, codexClaudeFunctionCallKeys(rootResult, gjson.Result{})) {
-			params.HasReceivedArgumentsDelta = true
-			output += codexClaudeFunctionArgumentsDelta(params.OpenBlockIndex, rootResult.Get("delta").String())
-		}
-	} else if typeStr == "response.function_call_arguments.done" {
-		// Some models (e.g. gpt-5.3-codex-spark) send function call arguments
-		// in a single "done" event without preceding "delta" events.
-		// Emit the full arguments as a single input_json_delta so the
-		// downstream Claude client receives the complete tool input.
-		// When delta events were already received, skip to avoid duplicating arguments.
-		if params.OpenBlockType == codexClaudeToolBlock && codexClaudeFunctionCallMatches(params, codexClaudeFunctionCallKeys(rootResult, gjson.Result{})) && !params.HasReceivedArgumentsDelta {
-			if args := rootResult.Get("arguments").String(); args != "" {
-				output += codexClaudeFunctionArgumentsDelta(params.OpenBlockIndex, args)
-				params.HasReceivedArgumentsDelta = true
+	} else if typeStr == "response.function_call_arguments.delta" || typeStr == "response.function_call_arguments.done" {
+		if tool := codexClaudeFindTool(params, codexClaudeFunctionCallKeys(rootResult, gjson.Result{})); tool != nil && !tool.Closed && !tool.Done {
+			full := typeStr == "response.function_call_arguments.done"
+			field := "delta"
+			if full {
+				field = "arguments"
 			}
+			output += codexClaudeToolArguments(params, tool, rootResult.Get(field).String(), full)
 		}
 	}
 
 	return []string{output}
+}
+
+func codexClaudeRefusalKey(event gjson.Result) string {
+	return fmt.Sprintf("%d:%d", event.Get("output_index").Int(), event.Get("content_index").Int())
+}
+
+// Refusal is visible assistant text in Claude format. Full done/snapshot events
+// may repeat streamed text; only emit a suffix when it extends that same part.
+func codexClaudeRefusalText(params *ConvertCodexResponseToClaudeParams, key, text string, full bool) string {
+	return codexClaudeVisibleText(params, key, text, full, true)
+}
+
+func codexClaudeMessageSnapshot(params *ConvertCodexResponseToClaudeParams, outputIndex int, item gjson.Result) string {
+	output := ""
+	for contentIndex, part := range item.Get("content").Array() {
+		kind := part.Get("type").String()
+		if kind != "output_text" && kind != "refusal" {
+			continue
+		}
+		field := "text"
+		if kind == "refusal" {
+			field = "refusal"
+		}
+		output += codexClaudeVisibleText(params, fmt.Sprintf("%d:%d", outputIndex, contentIndex), part.Get(field).String(), true, kind == "refusal")
+	}
+	return output
+}
+
+func codexClaudeVisibleText(params *ConvertCodexResponseToClaudeParams, key, text string, full, refusal bool) string {
+	if params.RefusalTextByPart == nil {
+		params.RefusalTextByPart = make(map[string]string)
+	}
+	if params.TextByPart == nil {
+		params.TextByPart = make(map[string]string)
+	}
+	parts := params.TextByPart
+	if refusal {
+		parts = params.RefusalTextByPart
+	}
+	previous := parts[key]
+	if full {
+		if !strings.HasPrefix(text, previous) {
+			return ""
+		}
+		text = strings.TrimPrefix(text, previous)
+	}
+	if text == "" {
+		return ""
+	}
+	parts[key] = previous + text
+	output := ""
+	if params.OpenBlockType != codexClaudeTextBlock {
+		output += closeCodexClaudeContentBlock(params)
+		block := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+		block, _ = sjson.Set(block, "index", params.BlockIndex)
+		openCodexClaudeContentBlock(params, codexClaudeTextBlock)
+		output += "event: content_block_start\n" + fmt.Sprintf("data: %s\n\n", block)
+	}
+	delta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
+	delta, _ = sjson.Set(delta, "index", params.OpenBlockIndex)
+	delta, _ = sjson.Set(delta, "delta.text", text)
+	return output + "event: content_block_delta\n" + fmt.Sprintf("data: %s\n\n", delta)
+}
+
+// Keep Claude blocks sequential: parallel upstream tools wait behind the first
+// unfinished call, with arguments buffered per identity rather than discarded.
+type codexClaudePendingTool struct {
+	Keys                  map[string]struct{}
+	Name, CallID          string
+	Arguments             string
+	Emitted               int
+	Started, Done, Closed bool
+	Index                 int
+}
+
+func codexClaudeFindTool(params *ConvertCodexResponseToClaudeParams, keys map[string]struct{}) *codexClaudePendingTool {
+	var match *codexClaudePendingTool
+	for _, tool := range params.Tools {
+		if len(keys) == 0 && (tool.Closed || tool.Done) {
+			continue
+		}
+		compatible, shared := true, false
+		for _, prefix := range []string{"output:", "item:", "call:"} {
+			a, aok := codexClaudeFunctionCallKeyValue(tool.Keys, prefix)
+			b, bok := codexClaudeFunctionCallKeyValue(keys, prefix)
+			if aok && bok {
+				if a != b {
+					compatible = false
+				}
+				shared = shared || a == b
+			}
+		}
+		if compatible && (shared || len(keys) == 0) {
+			if match != nil {
+				return nil
+			} // Ambiguous identity must not corrupt another call.
+			match = tool
+		}
+	}
+	if match != nil {
+		for key := range keys {
+			match.Keys[key] = struct{}{}
+		}
+	}
+	return match
+}
+
+func codexClaudeToolArguments(params *ConvertCodexResponseToClaudeParams, tool *codexClaudePendingTool, args string, full bool) string {
+	if full {
+		if !strings.HasPrefix(args, tool.Arguments) {
+			return ""
+		}
+		tool.Arguments = args
+	} else {
+		tool.Arguments += args
+	}
+	return codexClaudeDrainTools(params)
+}
+
+func codexClaudeHasPendingTool(params *ConvertCodexResponseToClaudeParams) bool {
+	for _, tool := range params.Tools {
+		if !tool.Closed {
+			return true
+		}
+	}
+	return false
+}
+
+func codexClaudeDrainTools(params *ConvertCodexResponseToClaudeParams) string {
+	output := ""
+	for _, tool := range params.Tools {
+		if tool.Closed {
+			continue
+		}
+		if !tool.Done {
+			break
+		}
+		if !gjson.Valid(tool.Arguments) || !gjson.Parse(tool.Arguments).IsObject() {
+			tool.Closed = true // Never expose a truncated/invalid tool as executable.
+			continue
+		}
+		if !tool.Started {
+			output += closeCodexClaudeContentBlock(params)
+			tool.Started = true
+			params.HasToolCall = true
+			tool.Index = params.BlockIndex
+			block := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+			block, _ = sjson.Set(block, "index", tool.Index)
+			block, _ = sjson.Set(block, "content_block.id", tool.CallID)
+			block, _ = sjson.Set(block, "content_block.name", tool.Name)
+			openCodexClaudeContentBlock(params, codexClaudeToolBlock)
+			output += "event: content_block_start\n" + fmt.Sprintf("data: %s\n\n", block)
+			output += codexClaudeFunctionArgumentsDelta(tool.Index, "")
+		}
+		if tool.Emitted < len(tool.Arguments) {
+			output += codexClaudeFunctionArgumentsDelta(tool.Index, tool.Arguments[tool.Emitted:])
+			tool.Emitted = len(tool.Arguments)
+		}
+		output += closeCodexClaudeContentBlock(params)
+		tool.Closed = true
+	}
+	if !codexClaudeHasPendingTool(params) && len(params.DeferredEvents) > 0 {
+		events := params.DeferredEvents
+		params.DeferredEvents = nil
+		params.ReplayingDeferred = true
+		var state any = params
+		for _, event := range events {
+			output += strings.Join(ConvertCodexResponseToClaude(context.Background(), "", nil, nil, event, &state), "")
+		}
+		params.ReplayingDeferred = false
+	}
+	return output
 }
 
 func openCodexClaudeContentBlock(params *ConvertCodexResponseToClaudeParams, blockType string) {
@@ -268,8 +445,6 @@ func closeCodexClaudeContentBlock(params *ConvertCodexResponseToClaudeParams) st
 	}
 	params.OpenBlockType = ""
 	params.OpenBlockIndex = 0
-	params.ActiveFunctionCallKeys = nil
-	params.HasReceivedArgumentsDelta = false
 	return "event: content_block_stop\n" + fmt.Sprintf("data: %s\n\n", template)
 }
 
@@ -300,20 +475,6 @@ func codexClaudeFunctionCallKeys(rootResult, itemResult gjson.Result) map[string
 	return keys
 }
 
-func codexClaudeFunctionCallMatches(params *ConvertCodexResponseToClaudeParams, eventKeys map[string]struct{}) bool {
-	if len(params.ActiveFunctionCallKeys) == 0 || len(eventKeys) == 0 {
-		return true
-	}
-	for _, prefix := range []string{"output:", "item:", "call:"} {
-		activeValue, activeOK := codexClaudeFunctionCallKeyValue(params.ActiveFunctionCallKeys, prefix)
-		eventValue, eventOK := codexClaudeFunctionCallKeyValue(eventKeys, prefix)
-		if activeOK && eventOK && activeValue != eventValue {
-			return false
-		}
-	}
-	return true
-}
-
 func codexClaudeFunctionCallKeyValue(keys map[string]struct{}, prefix string) (string, bool) {
 	for key := range keys {
 		if strings.HasPrefix(key, prefix) {
@@ -340,7 +501,8 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
 
 	rootResult := gjson.ParseBytes(rawJSON)
-	if rootResult.Get("type").String() != "response.completed" {
+	if eventType := rootResult.Get("type").String(); eventType != "response.completed" &&
+		!(eventType == "response.incomplete" && rootResult.Get("response.incomplete_details.reason").String() == "max_output_tokens") {
 		return ""
 	}
 
@@ -405,8 +567,11 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				if content := item.Get("content"); content.Exists() {
 					if content.IsArray() {
 						content.ForEach(func(_, part gjson.Result) bool {
-							if part.Get("type").String() == "output_text" {
+							if partType := part.Get("type").String(); partType == "output_text" || partType == "refusal" {
 								text := part.Get("text").String()
+								if partType == "refusal" {
+									text = part.Get("refusal").String()
+								}
 								if text != "" {
 									block := `{"type":"text","text":""}`
 									block, _ = sjson.Set(block, "text", text)
@@ -425,6 +590,10 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					}
 				}
 			case "function_call":
+				if responseData.Get("incomplete_details.reason").String() == "max_output_tokens" && !gjson.Valid(item.Get("arguments").String()) {
+					// Do not turn a truncated JSON argument into an executable empty tool.
+					return true
+				}
 				name := strings.TrimSpace(item.Get("name").String())
 				if original, ok := revNames[name]; ok {
 					name = strings.TrimSpace(original)
@@ -455,7 +624,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		})
 	}
 
-	if stopReason := responseData.Get("stop_reason"); stopReason.Exists() && stopReason.String() != "" {
+	if responseData.Get("incomplete_details.reason").String() == "max_output_tokens" {
+		out, _ = sjson.Set(out, "stop_reason", "max_tokens")
+	} else if stopReason := responseData.Get("stop_reason"); stopReason.Exists() && stopReason.String() != "" {
 		if stopReason.String() == "tool_use" && !hasToolCall {
 			out, _ = sjson.Set(out, "stop_reason", "end_turn")
 		} else {

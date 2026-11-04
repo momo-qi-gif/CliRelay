@@ -74,6 +74,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 		}
 		appendInput(message)
+	} else if systemsResult.Type == gjson.String && strings.HasPrefix(systemsResult.Raw, `"`) {
+		message := `{"type":"message","role":"developer","content":[{"type":"input_text","text":""}]}`
+		message, _ = sjson.SetRaw(message, "content.0.text", systemsResult.Raw)
+		appendInput(message)
 	}
 
 	// Build tool short-name map once for tool_use renames (avoid rescanning tools per call).
@@ -87,6 +91,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			// Codex accepts developer instructions, but rejects system roles
+			// in the input history. Preserve the message position and content.
+			if messageRole == "system" {
+				messageRole = "developer"
+			}
 
 			var contentBuf bytes.Buffer
 			contentFirst := true
@@ -160,6 +169,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "image":
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Exists() {
+							if sourceResult.Get("type").String() == "url" {
+								if url := sourceResult.Get("url"); url.Type == gjson.String {
+									appendImageContent(url.String())
+								}
+								continue
+							}
 							data := sourceResult.Get("data").String()
 							if data == "" {
 								data = sourceResult.Get("base64").String()
@@ -269,8 +284,54 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		toolsBuf.WriteByte(']')
 	}
 
-	// Convert thinking.budget_tokens to reasoning.effort.
+	toolChoiceJSON := `"auto"`
+	parallelToolCalls := true
+	toolChoice := rootResult.Get("tool_choice")
+	if toolChoice.IsObject() {
+		if toolChoice.Get("disable_parallel_tool_use").Type == gjson.True {
+			parallelToolCalls = false
+		}
+		switch toolChoice.Get("type").String() {
+		case "auto":
+			toolChoiceJSON = `"auto"`
+		case "any":
+			toolChoiceJSON = `"required"`
+		case "none":
+			toolChoiceJSON = `"none"`
+		case "tool":
+			name := toolChoice.Get("name").String()
+			if name != "" {
+				functionTool := false
+				webSearchTool := false
+				if toolsResult.IsArray() {
+					for _, tool := range toolsResult.Array() {
+						if tool.Get("name").String() != name {
+							continue
+						}
+						if tool.Get("type").String() == "web_search_20250305" {
+							webSearchTool = true
+						} else {
+							functionTool = true
+						}
+					}
+				}
+				if functionTool {
+					shortName := toolNameMap[name]
+					if shortName == "" {
+						shortName = shortenNameIfNeeded(name)
+					}
+					choice, _ := sjson.Set(`{"type":"function"}`, "name", shortName)
+					toolChoiceJSON = choice
+				} else if webSearchTool {
+					toolChoiceJSON = `{"type":"web_search"}`
+				}
+			}
+		}
+	}
+
+	// Preserve legacy thinking defaults when no valid explicit effort is provided.
 	reasoningEffort := "medium"
+	thinkingDisabled := false
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		switch thinkingConfig.Get("type").String() {
 		case "enabled":
@@ -281,13 +342,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 			}
 		case "adaptive":
-			// Claude adaptive means "enable with max capacity"; keep it as highest level
+			// Without explicit effort, retain the highest-level adaptive default
 			// and let ApplyThinking normalize per target model capability.
 			reasoningEffort = string(thinking.LevelXHigh)
 		case "disabled":
+			thinkingDisabled = true
 			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 				reasoningEffort = effort
 			}
+		}
+	}
+	// Claude Code sends adaptive effort separately from thinking.type. Honor it
+	// unless thinking is explicitly disabled; malformed values keep legacy behavior.
+	if effort := rootResult.Get("output_config.effort"); !thinkingDisabled && effort.Type == gjson.String {
+		switch effort.String() {
+		case "low", "medium", "high", "xhigh", "max":
+			reasoningEffort = effort.String()
 		}
 	}
 
@@ -301,9 +371,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if hasTools {
 		out.WriteString(`,"tools":`)
 		out.Write(toolsBuf.Bytes())
-		out.WriteString(`,"tool_choice":"auto"`)
+		out.WriteString(`,"tool_choice":`)
+		out.WriteString(toolChoiceJSON)
 	}
-	out.WriteString(`,"parallel_tool_calls":true,"reasoning":{"effort":`)
+	out.WriteString(`,"parallel_tool_calls":`)
+	out.WriteString(strconv.FormatBool(parallelToolCalls))
+	out.WriteString(`,"reasoning":{"effort":`)
 	out.Write(mustJSONString(reasoningEffort))
 	out.WriteString(`,"summary":"auto"},"stream":true,"store":false,"include":["reasoning.encrypted_content"]}`)
 	return out.Bytes()

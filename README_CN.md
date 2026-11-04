@@ -8,6 +8,8 @@
 
 <h1 align="center">CliRelay</h1>
 
+> 此维护分支已纳入线上 Claude Code → Codex 兼容补丁。补丁范围、回归测试和构建来源见 [维护说明](maintenance/README.md)。
+
 <p align="center">
   <strong>私有部署的 AI 网关：把你的 AI 编程订阅和 API Key 收进同一个入口，并配一套多租户管理面板来运营它。</strong>
 </p>

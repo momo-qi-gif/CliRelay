@@ -8,6 +8,8 @@
 
 <h1 align="center">CliRelay</h1>
 
+> This maintenance branch includes the deployed Claude Code → Codex compatibility fixes. See [maintenance notes](maintenance/README.md) for patch scope, regression tests and build provenance.
+
 <p align="center">
   <strong>A self-hosted gateway that puts your AI coding subscriptions and API keys behind one endpoint — with a multi-tenant control panel to run it.</strong>
 </p>

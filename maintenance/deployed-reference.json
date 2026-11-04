@@ -1,0 +1,13 @@
+{
+  "version": "v0.5.9-claude-stream-repair",
+  "base_commit": "11d8df955fafc72303c6e1b29fe1e648908fe6de",
+  "build_date_utc": "2026-11-04T06:46:08Z",
+  "go_version": "go1.27.3",
+  "goos": "linux",
+  "goarch": "amd64",
+  "cgo_enabled": false,
+  "binary_sha256": "27d8d0fe010e034e2234ed62d596fb31c9ba1f454ee761acf5fb2456f816e5ed",
+  "historical_combined_patch_sha256": "9129813fd86eb1d00078c347f9724ca45d92d4993cb0431692cc9d3972ccc2b2",
+  "deployment_verified_at_utc": "2026-11-04T09:11:10.902357+00:00",
+  "note": "Historical build Commit is the unpatched base. Match source manifest and binary hash as well; no production credentials or configuration are included."
+}

@@ -226,8 +226,16 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			}
 			continue
 		}
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
+		eventType := gjson.GetBytes(line, "type").String()
+		claudeSource := execCtx.SourceFormat == sdktranslator.FormatClaude
+		if eventType != "response.completed" && !(claudeSource && eventType == "response.incomplete") {
 			continue
+		}
+		if claudeSource {
+			if terminalErr := codexClaudeIncompleteTerminalError(line); terminalErr != nil {
+				reporter.publishFailureWithContentBytes(execCtx.Context, req.Payload, string(line))
+				return resp, terminalErr
+			}
 		}
 		line = mergeCodexResponsesCompletedOutput(line, pendingOutputItems, pendingOutputKeys)
 		// Non-stream: still rewrite /mnt/data markdown when hosted image results exist.
@@ -442,7 +450,17 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if bytes.HasPrefix(eventLine, dataTag) {
 					data := bytes.TrimSpace(eventLine[len(dataTag):])
 					switch gjson.GetBytes(data, "type").String() {
-					case "response.completed":
+					case "response.completed", "response.incomplete":
+						claudeSource := execCtx.SourceFormat == sdktranslator.FormatClaude
+						if gjson.GetBytes(data, "type").String() == "response.incomplete" && !claudeSource {
+							break // Other translators keep their existing terminal contract.
+						}
+						if claudeSource {
+							terminalErr = codexClaudeIncompleteTerminalError(data)
+							if terminalErr != nil {
+								break
+							}
+						}
 						completed = true
 						if detail, ok := parseCodexUsage(data); ok {
 							reporter.publish(execCtx.Context, detail)
@@ -452,6 +470,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 				}
 
+				if terminalErr != nil && execCtx.SourceFormat == sdktranslator.FormatClaude {
+					break // Claude must not turn an error terminal into a successful message_stop.
+				}
 				chunks := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, execCtx.OriginalPayload, body, eventLine, &param)
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
