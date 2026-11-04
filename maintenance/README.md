@@ -1,6 +1,6 @@
 # Claude Code → Codex 补丁维护
 
-此分支维护当前部署所用的源码修复。原始基线为 `11d8df955fafc72303c6e1b29fe1e648908fe6de`（CliRelay v0.5.9 发行线）。源码和回归测试是维护对象，不需要再应用旧目录中的 patch。
+本仓库统一维护已部署补丁及后续候选修复。原始基线为 `11d8df955fafc72303c6e1b29fe1e648908fe6de`（CliRelay v0.5.9 发行线）。源码和回归测试是维护对象，不需要再应用旧目录中的 patch。**0001–0007 为历史已部署参考；0008 为本地候选，尚未部署。**
 
 ## 已纳入修复
 
@@ -13,6 +13,9 @@
 | 0005 | 拒答保留、长度截断与其他终态分类 | 响应转换、codex executor/responses 及 terminal 回归 |
 | 0006 | 流式快照补全、交错工具独立参数、统一 FIFO、截断工具保护 | 响应转换、stream_repair/review_regression 测试 |
 | 0007 | 字符串顶层 system 与 URL 图片兼容 | 请求转换与 request_format_compat 测试 |
+| 0008（未部署） | 已知无工具 auto 分类器跳过隐式生图桥接，兼容计费前导 system block；不修改判定或裁剪响应 | executor/codex_image_generation_bridge.go 与 codex_auto_classifier_image_test.go |
+
+0008 的范围、复现、构建和验证见 [本地候选记录](verification-2026-11-04-auto-classifier-image-guard.md)。
 
 上述相对路径在 `internal/translator/codex/claude/` 与 `internal/runtime/executor/` 下。无关调度、账号、数据库 schema、前端保持基线。
 
@@ -24,6 +27,7 @@
 - deferred 文本、拒答、thinking 使用同一 FIFO，先回放再补 terminal 快照后缀。
 - Claude 长度截断返回 max_tokens；其他 incomplete 保持明确错误；Responses 直通合同另有回归测试。
 - 未注册的终态工具、无稳定身份的并行事件等不保证完整恢复。
+- 0008 只隔离已知 monitor 指令 + transcript 外已知 stage 后缀 + 无显式工具的分类请求；未知格式和显式工具保持旧策略，不解决普通主会话引用生图词的通用误判，不代表已验证线上提速。
 
 ## 构建
 

@@ -90,7 +90,7 @@ func maybeEnsureCodexImageGenerationTool(body []byte, auth *cliproxyauth.Auth, b
 	if requestHasLocalImageGenTool(body) {
 		return stripHostedImageGenerationTools(body)
 	}
-	if !codexImageGenerationBridgeEnabled(auth) {
+	if !codexImageGenerationBridgeEnabled(auth) || requestIsToollessAutoClassifier(body) {
 		return body
 	}
 	intent := requestLooksLikeImageGenerationIntent(body)
@@ -102,6 +102,55 @@ func maybeEnsureCodexImageGenerationTool(body []byte, auth *cliproxyauth.Auth, b
 		}
 	}
 	return body
+}
+
+// requestIsToollessAutoClassifier recognizes the known Claude Code auto approval
+// side query after translation. Its transcript is evidence to classify, not an
+// instruction to invoke a capability mentioned there. Only suppress implicit
+// bridge additions: explicit tools and unknown prompt formats keep their policy.
+func requestIsToollessAutoClassifier(body []byte) bool {
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && (!tools.IsArray() || len(tools.Array()) != 0) {
+		return false
+	}
+	const monitor = "You are a security monitor for autonomous AI coding agents."
+	monitorInstructions := strings.HasPrefix(strings.TrimSpace(gjson.GetBytes(body, "instructions").String()), monitor)
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return false
+	}
+	lastUser := ""
+	for _, item := range input.Array() {
+		switch item.Get("type").String() {
+		case "additional_tools", "function_call", "function_call_output":
+			return false
+		}
+		text := extractCodexInputItemText(item)
+		switch item.Get("role").String() {
+		case "system", "developer":
+			if strings.HasPrefix(strings.TrimSpace(text), monitor) {
+				monitorInstructions = true
+			}
+			// Attribution and other system blocks may precede the monitor block.
+			for _, part := range item.Get("content").Array() {
+				if part.Get("type").String() == "input_text" && strings.HasPrefix(strings.TrimSpace(part.Get("text").String()), monitor) {
+					monitorInstructions = true
+				}
+			}
+		case "user":
+			lastUser = text
+		}
+	}
+	if !monitorInstructions {
+		return false
+	}
+	start := strings.Index(lastUser, "<transcript>")
+	end := strings.LastIndex(lastUser, "</transcript>")
+	if start < 0 || end < start+len("<transcript>") {
+		return false
+	}
+	suffix := lastUser[end+len("</transcript>"):]
+	return strings.Contains(suffix, "Stage 1 does NOT apply user intent or ALLOW exceptions") ||
+		strings.Contains(suffix, "Review the classification process and follow it carefully")
 }
 
 // requestCarriesImageInput reports whether the recent user turns attach images.
