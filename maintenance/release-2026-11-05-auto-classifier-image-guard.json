@@ -1,0 +1,25 @@
+{
+  "version": "v0.5.9-auto-classifier-image-guard",
+  "source_commit": "03271e237d517012f5733b0f86539060b46f7a7c",
+  "build_date_utc": "2026-11-05T01:01:25Z",
+  "go_version": "go1.27.3",
+  "goos": "linux",
+  "goarch": "amd64",
+  "cgo_enabled": false,
+  "binary_sha256": "bea8bf6cda54e43d85b1dc6a94c628f1c1c99fb6f37e65a890a657986cdd747b",
+  "binary_bytes": 50385056,
+  "git_tree_clean_at_build": true,
+  "isolated_https_cases_passed": 20,
+  "deployment_verified_at_utc": "2026-11-05T01:28:34.889563+00:00",
+  "deployment_checks": {
+    "running_binary_hash_matches": true,
+    "health_status": 204,
+    "unauthenticated_models_status": 401,
+    "only_backend_binary_mount_source_changed": true,
+    "dependencies_and_configuration_unchanged": true
+  },
+  "real_upstream_model_smoke_executed": false,
+  "real_classifier_latency_improvement_verified": false,
+  "independent_code_review_completed": false,
+  "note": "Release identity and limited verification only. Internal hosts, deployment paths, backup data, and credentials are intentionally excluded. Historical deployed-reference.json is unchanged."
+}

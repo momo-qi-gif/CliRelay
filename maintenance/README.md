@@ -1,6 +1,6 @@
 # Claude Code → Codex 补丁维护
 
-本仓库统一维护已部署补丁及后续候选修复。原始基线为 `11d8df955fafc72303c6e1b29fe1e648908fe6de`（CliRelay v0.5.9 发行线）。源码和回归测试是维护对象，不需要再应用旧目录中的 patch。**0001–0007 为历史已部署参考；0008 为本地候选，尚未部署。**
+本仓库统一维护已部署补丁及后续候选修复。原始基线为 `11d8df955fafc72303c6e1b29fe1e648908fe6de`（CliRelay v0.5.9 发行线）。源码和回归测试是维护对象，不需要再应用旧目录中的 patch。**0001–0007 为历史已部署参考；0008 已于2026-11-05发布，正式源码提交为03271e23，见[发布身份记录](release-2026-11-05-auto-classifier-image-guard.json)。**
 
 ## 已纳入修复
 
@@ -13,9 +13,9 @@
 | 0005 | 拒答保留、长度截断与其他终态分类 | 响应转换、codex executor/responses 及 terminal 回归 |
 | 0006 | 流式快照补全、交错工具独立参数、统一 FIFO、截断工具保护 | 响应转换、stream_repair/review_regression 测试 |
 | 0007 | 字符串顶层 system 与 URL 图片兼容 | 请求转换与 request_format_compat 测试 |
-| 0008（未部署） | 已知无工具 auto 分类器跳过隐式生图桥接，兼容计费前导 system block；不修改判定或裁剪响应 | executor/codex_image_generation_bridge.go 与 codex_auto_classifier_image_test.go |
+| 0008 | 已知无工具 auto 分类器跳过隐式生图桥接，兼容计费前导 system block；不修改判定或裁剪响应 | executor/codex_image_generation_bridge.go 与 codex_auto_classifier_image_test.go |
 
-0008 的范围、复现、构建和验证见 [本地候选记录](verification-2026-11-04-auto-classifier-image-guard.md)。
+0008的范围、复现和测试限制见[候选验证记录](verification-2026-11-04-auto-classifier-image-guard.md)，正式构建身份及部署检查边界见[11/05发布记录](release-2026-11-05-auto-classifier-image-guard.json)。该发布没有执行真实上游模型冒烟，不代表已验证实际审批耗时改善。
 
 上述相对路径在 `internal/translator/codex/claude/` 与 `internal/runtime/executor/` 下。无关调度、账号、数据库 schema、前端保持基线。
 
